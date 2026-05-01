@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 
 const API_BASE = '/api';
 
@@ -11,14 +11,17 @@ export default function FileUploader({ onUploadComplete }) {
     try {
       const res = await fetch(`${API_BASE}/documents`);
       const data = await res.json();
-      setDocuments(data.documents || []);
+      const docs = data.documents || [];
+      setDocuments(docs);
+      return docs;
     } catch (err) {
       console.error('Fetch docs error:', err);
+      return [];
     }
   }, []);
 
   // Initial load
-  useState(() => { fetchDocuments(); });
+  useEffect(() => { fetchDocuments(); }, [fetchDocuments]);
 
   const uploadFiles = useCallback(async (files) => {
     const formData = new FormData();
@@ -32,12 +35,19 @@ export default function FileUploader({ onUploadComplete }) {
         body: formData
       });
       const data = await res.json();
+      const targetIds = new Set((data.documents || []).map(d => d.id).filter(Boolean));
 
-      // Poll for completion
+      // Poll for completion (read fresh state, not the stale upload response)
+      const MAX_TRIES = 90; // 3 min cap
+      let tries = 0;
       const pollInterval = setInterval(async () => {
-        await fetchDocuments();
-        const allDone = data.documents?.every(d => d.status === 'indexed' || d.status === 'error');
-        if (allDone) clearInterval(pollInterval);
+        tries++;
+        const fresh = await fetchDocuments();
+        const watched = fresh.filter(d => targetIds.has(d.id));
+        const allDone =
+          watched.length === targetIds.size &&
+          watched.every(d => d.status === 'indexed' || d.status === 'error');
+        if (allDone || tries >= MAX_TRIES) clearInterval(pollInterval);
       }, 2000);
 
       onUploadComplete?.(data);
@@ -87,9 +97,15 @@ export default function FileUploader({ onUploadComplete }) {
         aria-label="Upload files"
         tabIndex={0}
       >
-        <div className="icon">📄</div>
-        <p>Drop PDF, TXT, or MD files here</p>
-        <p style={{ fontSize: 11, marginTop: 4 }}>or click to browse</p>
+        <div className="icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <p>Drop PDF, TXT, or MD files</p>
+        <p className="hint">or click to browse</p>
       </div>
       <input
         ref={fileInputRef}
@@ -105,9 +121,7 @@ export default function FileUploader({ onUploadComplete }) {
             <span className="filename">{doc.filename}</span>
             <span className={statusClass(doc.status)}>{doc.status}</span>
             {doc.status === 'indexed' && (
-              <span style={{ fontSize: 11, color: 'var(--muted)', margin: '0 8px' }}>
-                {doc.chunk_count} chunks
-              </span>
+              <span className="chunks">{doc.chunk_count}</span>
             )}
             <button
               className="delete-btn"

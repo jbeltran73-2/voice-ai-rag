@@ -1,143 +1,296 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
 const API_BASE = '/api';
-const WS_URL = 'wss://api.x.ai/v1/realtime';
+const XAI_REALTIME_URL = 'wss://api.x.ai/v1/realtime';
+const XAI_AUDIO_RATE = 24000;
 
-export function useVoiceAgent({ onTranscript, onCitations, onStatusChange }) {
+function float32ToPCM16Base64(float32Array) {
+  const pcm16 = new Int16Array(float32Array.length);
+  for (let i = 0; i < float32Array.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  const bytes = new Uint8Array(pcm16.buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function base64PCM16ToFloat32(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const pcm16 = new Int16Array(bytes.buffer);
+  const f32 = new Float32Array(pcm16.length);
+  for (let i = 0; i < pcm16.length; i++) {
+    f32[i] = pcm16[i] / (pcm16[i] < 0 ? 0x8000 : 0x7fff);
+  }
+  return f32;
+}
+
+const CHUNK_DURATION_MS = 100;
+
+// Downsample Float32 PCM from native rate to target rate (linear interpolation)
+function downsample(float32Array, fromRate, toRate) {
+  if (fromRate === toRate) return float32Array;
+  const ratio = fromRate / toRate;
+  const newLength = Math.round(float32Array.length / ratio);
+  const result = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const srcIdx = i * ratio;
+    const lo = Math.floor(srcIdx);
+    const hi = Math.min(lo + 1, float32Array.length - 1);
+    const frac = srcIdx - lo;
+    result[i] = float32Array[lo] * (1 - frac) + float32Array[hi] * frac;
+  }
+  return result;
+}
+
+export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTurnComplete }) {
   const wsRef = useRef(null);
   const audioCtxRef = useRef(null);
-  const streamRef = useRef(null);
-  const processorRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const micSourceRef = useRef(null);
+  const micWorkletRef = useRef(null);
+  const nextPlaybackTimeRef = useRef(0);
+  const scheduledSourcesRef = useRef([]);
+  const connectingRef = useRef(false);
+  const isSessionConfiguredRef = useRef(false);
+  const workletReadyRef = useRef(false);
+  const playAudioRef = useRef(null);
+  const stopPlaybackRef = useRef(null);
+  const handleRAGCallRef = useRef(null);
+  const configureSessionRef = useRef(null);
+
   const [isRecording, setIsRecording] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
   const [micAvailable, setMicAvailable] = useState(true);
-  const playbackQueueRef = useRef([]);
-  const isPlayingRef = useRef(false);
-  const currentAudioRef = useRef(null);
 
-  // Connect to xAI Voice Agent via WebSocket
+  useEffect(() => {
+    navigator.mediaDevices?.getUserMedia({ audio: true })
+      .then(stream => { stream.getTracks().forEach(t => t.stop()); setMicAvailable(true); })
+      .catch(() => setMicAvailable(false));
+  }, []);
+
+  // ─── Audio Context (native sample rate) ──────────────────
+  const getAudioContext = useCallback(() => {
+    if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+      audioCtxRef.current = new AudioContext();
+      console.log('Audio context at native rate:', audioCtxRef.current.sampleRate);
+    }
+    return audioCtxRef.current;
+  }, []);
+
+  // ─── Connect ───────────────────────────────────────────
   const connect = useCallback(async () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return wsRef.current;
+    if (connectingRef.current) return null;
+    connectingRef.current = true;
+    onStatusChange?.('Connecting...');
+
     try {
-      // Get ephemeral token from backend
+      // 1. Get ephemeral token from our backend
       const res = await fetch(`${API_BASE}/token`, { method: 'POST' });
-      if (!res.ok) throw new Error('Failed to get token');
+      if (!res.ok) throw new Error('Token request failed');
       const tokenData = await res.json();
-      const secret = tokenData.client_secret?.value || tokenData.key || tokenData;
+      const ephemeralToken = tokenData.value;
 
-      const ws = new WebSocket(`${WS_URL}?model=grok-voice-think-fast-1.0`, [
-        'realtime',
-        `xai-client-secret.${secret}`
-      ]);
+      // 2. Open WebSocket to xAI using OpenAI-compatible subprotocol
+      const ws = new WebSocket(
+        `${XAI_REALTIME_URL}?model=grok-voice-think-fast-1.0`,
+        [
+          'realtime',
+          `openai-insecure-api-key.${ephemeralToken}`,
+          'openai-beta.realtime-v1',
+        ]
+      );
 
-      ws.onopen = () => {
-        setIsConnected(true);
-        onStatusChange?.('Connected');
-        // Configure session
-        ws.send(JSON.stringify({
-          type: 'session.update',
-          session: {
-            input_audio_format: 'pcm16',
-            output_audio_format: 'pcm16',
-            turn_detection: {
-              type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 500
-            },
-            tools: [{
-              type: 'function',
-              name: 'search_documents',
-              description: 'Search uploaded documents for relevant information.',
-              parameters: {
-                type: 'object',
-                properties: {
-                  query: { type: 'string', description: 'Search query' }
-                },
-                required: ['query']
-              }
-            }]
-          }
-        }));
+      // 3. Wire up message handler BEFORE waiting for open,
+      //    so we don't miss the early session.created event.
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        handleMessage(msg, ws);
       };
-
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        handleMessage(msg);
-      };
-
       ws.onclose = () => {
         setIsConnected(false);
+        setIsRecording(false);
+        setIsThinking(false);
         wsRef.current = null;
+        isSessionConfiguredRef.current = false;
         onStatusChange?.('Disconnected');
+        onTurnComplete?.();
       };
+      ws.onerror = () => onStatusChange?.('WebSocket error');
 
-      ws.onerror = (err) => {
-        console.error('WS error:', err);
-        onStatusChange?.('Error');
-      };
+      // 4. Wait for open (handlers are already wired, so session.created won't be missed)
+      await new Promise((resolve, reject) => {
+        if (ws.readyState === WebSocket.OPEN) { resolve(); return; }
+        ws.onopen = resolve;
+        ws.onerror = () => reject(new Error('WebSocket open failed'));
+        setTimeout(() => reject(new Error('Connection timeout')), 10000);
+      });
 
       wsRef.current = ws;
+      setIsConnected(true);
+
+      // 5. Send session.update immediately on open (like the official xAI example),
+      //    rather than waiting for session.created to arrive.
+      configureSessionRef.current?.(ws);
+      onStatusChange?.('Connected, configuring...');
+      return ws;
     } catch (err) {
       console.error('Connect error:', err);
-      onStatusChange?.('Connection failed');
+      onStatusChange?.('Connection failed: ' + err.message);
+      return null;
+    } finally {
+      connectingRef.current = false;
     }
-  }, [onStatusChange]);
+  }, [onStatusChange, onTurnComplete]);
 
-  // Handle incoming WebSocket messages
-  const handleMessage = useCallback((msg) => {
+  // ─── Handle incoming messages ───────────────────────────
+  const handleMessage = useCallback((msg, ws) => {
     switch (msg.type) {
+      // Session lifecycle
       case 'session.created':
+        console.log('Session:', msg.session?.id);
         break;
 
-      case 'response.audio_transcript.delta': {
-        // Partial transcript from assistant
-        onTranscript?.(msg.delta, 'assistant', false);
-        break;
-      }
-
-      case 'response.audio_transcript.done': {
-        onTranscript?.(msg.transcript, 'assistant', true);
-        break;
-      }
-
-      case 'conversation.item.input_audio_transcription.completed': {
-        // User's speech was transcribed
-        if (msg.transcript) {
-          onTranscript?.(msg.transcript, 'user', true);
+      case 'session.updated':
+        if (!isSessionConfiguredRef.current) {
+          isSessionConfiguredRef.current = true;
+          console.log('Session configured, ready for voice');
+          onStatusChange?.('Ready - click mic to talk');
         }
         break;
-      }
 
-      case 'response.audio.delta': {
-        // Audio chunk from assistant - queue for playback
-        if (msg.delta) {
-          queueAudio(msg.delta);
+      // User speech started — cancel ongoing response and stop playback
+      case 'input_audio_buffer.speech_started':
+        console.log('Speech started');
+        stopPlaybackRef.current?.();
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'response.cancel' }));
+        }
+        onStatusChange?.('Listening...');
+        break;
+
+      // User audio committed (done speaking)
+      case 'input_audio_buffer.committed':
+        console.log('Audio committed');
+        onStatusChange?.('Processing...');
+        break;
+
+      // User transcript via conversation.item.added
+      case 'conversation.item.added':
+        if (msg.item?.role === 'user' && msg.item?.content) {
+          for (const content of msg.item.content) {
+            if (content.type === 'input_audio' && content.transcript) {
+              onTranscript?.(content.transcript, 'user', true);
+              break;
+            }
+          }
         }
         break;
-      }
 
-      case 'response.function_call_arguments.done': {
-        // Grok is calling our search_documents tool
-        handleFunctionCall(msg);
+      // Assistant audio streaming
+      case 'response.output_audio.delta':
+        if (msg.delta) playAudioRef.current?.(msg.delta);
         break;
-      }
 
-      case 'response.done': {
+      // Assistant transcript streaming
+      case 'response.output_audio_transcript.delta':
+        if (msg.delta) onTranscript?.(msg.delta, 'assistant', false);
+        break;
+
+      // Function call from Grok → do RAG
+      case 'response.function_call_arguments.done':
+        if (msg.name === 'search_documents') handleRAGCallRef.current?.(msg, ws);
+        break;
+
+      // Response lifecycle
+      case 'response.created':
+        setIsThinking(true);
+        break;
+      case 'response.done':
         setIsThinking(false);
+        onStatusChange?.('Ready');
+        onTurnComplete?.();
         break;
-      }
+
+      case 'error':
+        console.error('xAI error:', msg.message || msg);
+        setIsThinking(false);
+        onStatusChange?.('Error: ' + (msg.message || 'unknown'));
+        break;
 
       default:
         break;
     }
-  }, [onTranscript, onCitations]);
+  }, [onTranscript, onCitations, onStatusChange, onTurnComplete]);
 
-  // Handle function call from Grok (search_documents)
-  const handleFunctionCall = useCallback(async (msg) => {
-    if (msg.name !== 'search_documents') return;
+  // ─── Configure session (xAI format) ─────────────────────
+  const configureSession = useCallback((ws) => {
+    const sessionConfig = {
+      type: 'session.update',
+      session: {
+        instructions: [
+          'You are a voice assistant that helps the user explore their personal collection of uploaded documents (PDFs, notes, reports).',
+          '',
+          'CRITICAL RULES — follow them in order:',
+          '1. For ANY question that involves a concrete piece of information — products, plans, services, names, dates, prices, contracts, reports, internal data, or anything that could plausibly appear in the user\'s documents — you MUST call the search_documents function FIRST before answering. Do NOT say "I don\'t have that information", "no tengo información sobre…", "no conozco ese plan", or anything similar without first invoking search_documents.',
+          '2. After calling search_documents, base your answer strictly on the returned context. Cite the source by filename and page number when possible.',
+          '3. ONLY if search_documents returns no relevant context (or returns "No documents found.") may you tell the user that you don\'t have that information in their documents. Phrase it naturally, e.g. "No tengo esa información en tus documentos" / "I don\'t have that in your documents."',
+          '4. For greetings, small talk, or meta questions about how to use the app, you don\'t need to search.',
+          '5. Always reply in the same language the user is speaking. If the user speaks Spanish, reply in Spanish.',
+          '6. Keep responses concise and conversational since they will be spoken out loud. Avoid long lists; summarize naturally.',
+        ].join('\n'),
+        voice: 'yy6flpd9dq90',
+        turn_detection: {
+          type: 'server_vad',
+          threshold: 0.85,
+          silence_duration_ms: 0,
+        },
+        input_audio_transcription: {
+          model: 'grok-2-audio',
+        },
+        audio: {
+          input: {
+            format: {
+              type: 'audio/pcm',
+              rate: XAI_AUDIO_RATE,
+            },
+          },
+          output: {
+            format: {
+              type: 'audio/pcm',
+              rate: XAI_AUDIO_RATE,
+            },
+          },
+        },
+        tools: [{
+          type: 'function',
+          name: 'search_documents',
+          description: 'Search uploaded documents for relevant information. Call this whenever the user asks a question that might require document context.',
+          parameters: {
+            type: 'object',
+            properties: { query: { type: 'string', description: 'The search query to find relevant document passages' } },
+            required: ['query']
+          }
+        }]
+      }
+    };
+    ws.send(JSON.stringify(sessionConfig));
+    console.log('Session update sent with rate:', XAI_AUDIO_RATE);
+  }, []);
+  configureSessionRef.current = configureSession;
+
+  // ─── RAG function call handler ──────────────────────────
+  const handleRAGCall = useCallback(async (msg, ws) => {
     setIsThinking(true);
-
     try {
       const args = JSON.parse(msg.arguments);
       const res = await fetch(`${API_BASE}/query`, {
@@ -146,205 +299,214 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange }) {
         body: JSON.stringify({ query: args.query })
       });
       const data = await res.json();
+      if (data.citations?.length) onCitations?.(data.citations);
 
-      // Send citations to UI
-      if (data.citations && data.citations.length > 0) {
-        onCitations?.(data.citations);
-      }
-
-      // Send function result back to Grok
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (ws?.readyState === WebSocket.OPEN) {
+        // Send function result
         ws.send(JSON.stringify({
           type: 'conversation.item.create',
           item: {
             type: 'function_call_output',
             call_id: msg.call_id,
-            output: JSON.stringify({
-              context: data.context || 'No documents found.',
-              citations: data.citations || []
-            })
+            output: JSON.stringify({ context: data.context || 'No documents found.', citations: data.citations || [] })
           }
         }));
-
-        // Request Grok to generate a response with the context
+        // Request next response
         ws.send(JSON.stringify({ type: 'response.create' }));
       }
     } catch (err) {
-      console.error('Function call error:', err);
+      console.error('RAG call error:', err);
       setIsThinking(false);
     }
   }, [onCitations]);
+  handleRAGCallRef.current = handleRAGCall;
 
-  // Audio playback
-  const queueAudio = useCallback((base64Delta) => {
-    const bytes = atob(base64Delta);
-    const samples = new Int16Array(bytes.length / 2);
-    for (let i = 0; i < bytes.length; i += 2) {
-      samples[i / 2] = (bytes.charCodeAt(i + 1) << 8) | bytes.charCodeAt(i);
+  // ─── Audio playback (gapless scheduling) ───────────────
+  // Incoming audio is PCM16 at 24000 Hz from xAI. We create the AudioBuffer
+  // at 24000 Hz and let the AudioContext resample to its native rate on playback.
+  const playAudio = useCallback((base64) => {
+    try {
+      const ctx = getAudioContext();
+      if (ctx.state === 'suspended') ctx.resume();
+
+      const float32Data = base64PCM16ToFloat32(base64);
+      const buf = ctx.createBuffer(1, float32Data.length, XAI_AUDIO_RATE);
+      buf.getChannelData(0).set(float32Data);
+
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+
+      const now = ctx.currentTime;
+      nextPlaybackTimeRef.current = Math.max(now, nextPlaybackTimeRef.current);
+      src.start(nextPlaybackTimeRef.current);
+      nextPlaybackTimeRef.current += buf.duration;
+
+      scheduledSourcesRef.current.push(src);
+      src.onended = () => {
+        scheduledSourcesRef.current = scheduledSourcesRef.current.filter(s => s !== src);
+      };
+    } catch (err) {
+      console.error('Playback error:', err);
     }
+  }, [getAudioContext]);
+  playAudioRef.current = playAudio;
 
-    if (!audioCtxRef.current) {
-      audioCtxRef.current = new AudioContext({ sampleRate: 24000 });
-    }
-
-    const ctx = audioCtxRef.current;
-    const float32 = new Float32Array(samples.length);
-    for (let i = 0; i < samples.length; i++) {
-      float32[i] = samples[i] / 32768;
-    }
-
-    const buffer = ctx.createBuffer(1, float32.length, 24000);
-    buffer.getChannelData(0).set(float32);
-
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-
-    playbackQueueRef.current.push(source);
-    source.onended = () => {
-      playbackQueueRef.current = playbackQueueRef.current.filter(s => s !== source);
-      playNext();
-    };
-
-    if (!isPlayingRef.current) {
-      playNext();
-    }
+  const stopPlayback = useCallback(() => {
+    scheduledSourcesRef.current.forEach(s => {
+      try { s.stop(); s.disconnect(); } catch (_) {}
+    });
+    scheduledSourcesRef.current = [];
+    nextPlaybackTimeRef.current = audioCtxRef.current?.currentTime || 0;
   }, []);
+  stopPlaybackRef.current = stopPlayback;
 
-  const playNext = () => {
-    if (playbackQueueRef.current.length === 0) {
-      isPlayingRef.current = false;
-      return;
-    }
-    isPlayingRef.current = true;
-    const source = playbackQueueRef.current.shift();
-    source.start();
-  };
-
-  // Start recording (push-to-talk start)
+  // ─── Start mic + streaming ──────────────────────────────
   const startRecording = useCallback(async () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      await connect();
-      // Small delay to let connection establish
-      await new Promise(r => setTimeout(r, 500));
-    }
-
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!micAvailable) return;
 
     try {
+      const ctx = getAudioContext();
+      if (ctx.state === 'suspended') await ctx.resume();
+      const nativeSampleRate = ctx.sampleRate;
+
+      // Load AudioWorklet module if not already loaded
+      if (!workletReadyRef.current) {
+        await ctx.audioWorklet.addModule('/pcm-processor.js');
+        workletReadyRef.current = true;
+      }
+
+      // Get mic stream
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: 24000,
+          sampleRate: nativeSampleRate,
           channelCount: 1,
           echoCancellation: true,
-          noiseSuppression: true
+          noiseSuppression: true,
+          autoGainControl: true,
         }
       });
-      streamRef.current = stream;
+      micStreamRef.current = stream;
 
-      const audioCtx = new AudioContext({ sampleRate: 24000 });
-      const source = audioCtx.createMediaStreamSource(stream);
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      const source = ctx.createMediaStreamSource(stream);
+      micSourceRef.current = source;
 
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcm16 = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]));
-          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      // AudioWorkletNode — runs on dedicated audio thread, not main thread
+      const worklet = new AudioWorkletNode(ctx, 'pcm-processor');
+
+      let audioBuffer = [];
+      let totalSamples = 0;
+      const chunkSizeSamples = (ctx.sampleRate * CHUNK_DURATION_MS) / 1000;
+
+      worklet.port.onmessage = (e) => {
+        const inputData = e.data;
+        audioBuffer.push(inputData);
+        totalSamples += inputData.length;
+
+        while (totalSamples >= chunkSizeSamples) {
+          const chunk = new Float32Array(chunkSizeSamples);
+          let offset = 0;
+
+          while (offset < chunkSizeSamples && audioBuffer.length > 0) {
+            const buf = audioBuffer[0];
+            const needed = chunkSizeSamples - offset;
+            const available = buf.length;
+
+            if (available <= needed) {
+              chunk.set(buf, offset);
+              offset += available;
+              totalSamples -= available;
+              audioBuffer.shift();
+            } else {
+              chunk.set(buf.subarray(0, needed), offset);
+              audioBuffer[0] = buf.subarray(needed);
+              offset += needed;
+              totalSamples -= needed;
+            }
+          }
+
+          // Downsample from native rate to 24000 Hz before sending
+          const resampled = downsample(chunk, ctx.sampleRate, XAI_AUDIO_RATE);
+
+          const ws = wsRef.current;
+          if (ws?.readyState === WebSocket.OPEN && isSessionConfiguredRef.current) {
+            ws.send(JSON.stringify({
+              type: 'input_audio_buffer.append',
+              audio: float32ToPCM16Base64(resampled)
+            }));
+          }
         }
-        const base64 = arrayBufferToBase64(pcm16.buffer);
-        ws.send(JSON.stringify({
-          type: 'input_audio_buffer.append',
-          audio: base64
-        }));
       };
 
-      source.connect(processor);
-      processor.connect(audioCtx.destination);
-      processorRef.current = processor;
+      source.connect(worklet);
+      // Mute local feedback (we don't want to hear ourselves)
+      const muteGain = ctx.createGain();
+      muteGain.gain.value = 0;
+      worklet.connect(muteGain);
+      muteGain.connect(ctx.destination);
+      micWorkletRef.current = worklet;
+
+      // Connect WebSocket
+      const ws = await connect();
+      if (!ws) {
+        worklet.disconnect();
+        source.disconnect();
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
 
       setIsRecording(true);
+      onStatusChange?.('Connecting...');
     } catch (err) {
-      console.error('Mic access denied:', err);
+      console.error('Mic denied:', err);
       setMicAvailable(false);
+      onStatusChange?.('Microphone denied');
     }
-  }, [connect]);
+  }, [micAvailable, connect, getAudioContext, onStatusChange]);
 
-  // Stop recording (push-to-talk end)
+  // ─── Stop mic ──────────────────────────────────────────
   const stopRecording = useCallback(() => {
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
+    if (micWorkletRef.current) {
+      micWorkletRef.current.port.close();
+      micWorkletRef.current.disconnect();
+      micWorkletRef.current = null;
     }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
-    }
-
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
-      ws.send(JSON.stringify({ type: 'response.create' }));
-    }
+    if (micSourceRef.current) { micSourceRef.current.disconnect(); micSourceRef.current = null; }
+    if (micStreamRef.current) { micStreamRef.current.getTracks().forEach(t => t.stop()); micStreamRef.current = null; }
 
     setIsRecording(false);
-  }, []);
+    onStatusChange?.('Stopped');
+  }, [onStatusChange]);
 
-  // Send text query (fallback)
+  // ─── Toggle ──────────────────────────────────────────
+  const toggleRecording = useCallback(() => {
+    if (isRecording) stopRecording();
+    else startRecording();
+  }, [isRecording, startRecording, stopRecording]);
+
+  // ─── Text fallback ───────────────────────────────────
   const sendText = useCallback(async (text) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      await connect();
-      await new Promise(r => setTimeout(r, 500));
-    }
-
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const ctx = getAudioContext();
+    const ws = wsRef.current?.readyState === WebSocket.OPEN
+      ? wsRef.current
+      : await connect();
+    if (!ws) return;
 
     onTranscript?.(text, 'user', true);
-
-    // Add user text message to conversation
     ws.send(JSON.stringify({
       type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text }]
-      }
+      item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] }
     }));
-
     ws.send(JSON.stringify({ type: 'response.create' }));
     setIsThinking(true);
-  }, [connect, onTranscript]);
+  }, [connect, getAudioContext, onTranscript]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (wsRef.current) wsRef.current.close();
-      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-      if (audioCtxRef.current) audioCtxRef.current.close();
-    };
+  // ─── Cleanup ───────────────────────────────────────────
+  useEffect(() => () => {
+    wsRef.current?.close();
+    micStreamRef.current?.getTracks().forEach(t => t.stop());
+    audioCtxRef.current?.close();
   }, []);
 
-  return {
-    isRecording,
-    isConnected,
-    isThinking,
-    micAvailable,
-    connect,
-    startRecording,
-    stopRecording,
-    sendText
-  };
-}
-
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+  return { isRecording, isConnected, isThinking, micAvailable, toggleRecording, startRecording, stopRecording, sendText, connect };
 }

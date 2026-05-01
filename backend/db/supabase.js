@@ -63,13 +63,20 @@ export async function deleteDocument(id) {
 export async function insertChunks(chunks) {
   if (chunks.length === 0) return;
 
-  const values = chunks.map(c =>
-    `('${escapeStr(c.document_id)}', '${escapeStr(c.content)}', '${c.embedding}'::vector, '${escapeStr(JSON.stringify(c.metadata))}'::jsonb)`
-  ).join(', ');
+  // Batch insert to avoid "Request body is too large" on large PDFs.
+  // Each chunk carries a 1536-dim embedding (~30KB serialized), so we keep
+  // batches small.
+  const BATCH = 25;
+  for (let i = 0; i < chunks.length; i += BATCH) {
+    const slice = chunks.slice(i, i + BATCH);
+    const values = slice.map(c =>
+      `('${escapeStr(c.document_id)}', '${escapeStr(c.content)}', '${c.embedding}'::vector, '${escapeStr(JSON.stringify(c.metadata))}'::jsonb)`
+    ).join(', ');
 
-  await sql(
-    `INSERT INTO voicechat.chunks (document_id, content, embedding, metadata) VALUES ${values}`
-  );
+    await sql(
+      `INSERT INTO voicechat.chunks (document_id, content, embedding, metadata) VALUES ${values}`
+    );
+  }
 }
 
 export async function matchChunks(queryEmbedding, matchThreshold = 0.3, matchCount = 8) {

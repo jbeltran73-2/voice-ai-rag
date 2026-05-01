@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import './styles/index.css';
 import ThemeToggle from './components/ThemeToggle';
 import FileUploader from './components/FileUploader';
@@ -10,45 +10,65 @@ import { useVoiceAgent } from './hooks/useVoiceAgent';
 export default function App() {
   const [messages, setMessages] = useState([]);
   const [status, setStatus] = useState('');
-  const transcriptEndRef = useRef(null);
-  const partialRef = useRef({});
 
+  // Append/extend transcript entries.
+  // - Final user transcripts always create a new bubble.
+  // - Assistant streaming deltas extend the last assistant bubble if it is
+  //   still "open" (created in this turn). Otherwise they create a new one.
+  // The previous turn's assistant message is left untouched.
   const handleTranscript = useCallback((text, role, isFinal) => {
-    if (isFinal) {
-      setMessages(prev => {
-        // Remove any partial message for this role and add final
-        const filtered = partialRef.current.key
-          ? prev.filter((_, i) => i !== partialRef.current.key)
-          : prev;
-        return [...filtered, { role, text, citations: role === 'assistant' ? [] : undefined }];
-      });
-      partialRef.current = {};
-    } else {
-      // Update partial assistant message
-      setMessages(prev => {
+    setMessages(prev => {
+      if (role === 'user' && isFinal) {
+        return [...prev, { role: 'user', text }];
+      }
+
+      if (role === 'assistant' && !isFinal) {
         const last = prev[prev.length - 1];
-        if (last && last.role === 'assistant' && !last._final) {
-          const updated = [...prev];
+        if (last && last.role === 'assistant' && last._streaming) {
+          const updated = prev.slice();
           updated[updated.length - 1] = { ...last, text: last.text + text };
           return updated;
         }
-        const key = prev.length;
-        partialRef.current = { key };
-        return [...prev, { role, text, _final: false }];
-      });
-    }
-    // Auto scroll
-    setTimeout(() => transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+        return [...prev, { role: 'assistant', text, citations: [], _streaming: true }];
+      }
+
+      // Final assistant transcript (rare path): close the streaming bubble.
+      if (role === 'assistant' && isFinal) {
+        const last = prev[prev.length - 1];
+        if (last && last.role === 'assistant' && last._streaming) {
+          const updated = prev.slice();
+          updated[updated.length - 1] = { ...last, text, _streaming: false };
+          return updated;
+        }
+        return [...prev, { role: 'assistant', text, citations: [] }];
+      }
+
+      return prev;
+    });
+  }, []);
+
+  // Called when the model finishes a turn — close any open assistant bubble.
+  const handleTurnComplete = useCallback(() => {
+    setMessages(prev => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'assistant' && last._streaming) {
+        const updated = prev.slice();
+        updated[updated.length - 1] = { ...last, _streaming: false };
+        return updated;
+      }
+      return prev;
+    });
   }, []);
 
   const handleCitations = useCallback((citations) => {
     setMessages(prev => {
-      const updated = [...prev];
-      const lastAssistant = [...updated].reverse().findIndex(m => m.role === 'assistant');
-      if (lastAssistant >= 0) {
-        const idx = updated.length - 1 - lastAssistant;
-        updated[idx] = { ...updated[idx], citations };
+      let idx = -1;
+      for (let i = prev.length - 1; i >= 0; i--) {
+        if (prev[i].role === 'assistant') { idx = i; break; }
       }
+      if (idx < 0) return prev;
+      const updated = prev.slice();
+      updated[idx] = { ...updated[idx], citations };
       return updated;
     });
   }, []);
@@ -58,20 +78,14 @@ export default function App() {
     isConnected,
     isThinking,
     micAvailable,
-    connect,
-    startRecording,
-    stopRecording,
+    toggleRecording,
     sendText
   } = useVoiceAgent({
     onTranscript: handleTranscript,
     onCitations: handleCitations,
-    onStatusChange: setStatus
+    onStatusChange: setStatus,
+    onTurnComplete: handleTurnComplete
   });
-
-  const handleStart = useCallback(async () => {
-    if (!isConnected) await connect();
-    startRecording();
-  }, [isConnected, connect, startRecording]);
 
   return (
     <div className="app">
@@ -83,18 +97,32 @@ export default function App() {
         <FileUploader />
       </aside>
       <main className="main">
+        <header className="assistant-header">
+          <div className="assistant-avatar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="11" width="18" height="10" rx="2"/>
+              <circle cx="12" cy="5" r="2"/>
+              <path d="M12 7v4"/>
+              <line x1="8" y1="16" x2="8" y2="16"/>
+              <line x1="16" y1="16" x2="16" y2="16"/>
+            </svg>
+          </div>
+          <div className="assistant-info">
+            <span className="assistant-name">Agent Voice</span>
+            <span className={`assistant-status${isConnected ? '' : ' offline'}`}>
+              <span className="dot"></span>
+              {isConnected ? 'Available' : 'Offline'}
+            </span>
+          </div>
+        </header>
         <Transcript messages={messages} isThinking={isThinking} />
-        <div ref={transcriptEndRef} />
-        {micAvailable && (
-          <PushToTalk
-            isRecording={isRecording}
-            isConnected={isConnected}
-            micAvailable={micAvailable}
-            onStart={handleStart}
-            onStop={stopRecording}
-            status={status}
-          />
-        )}
+        <PushToTalk
+          isRecording={isRecording}
+          isConnected={isConnected}
+          micAvailable={micAvailable}
+          onToggle={toggleRecording}
+          status={status}
+        />
         <TextInput onSend={sendText} disabled={isThinking} />
       </main>
     </div>

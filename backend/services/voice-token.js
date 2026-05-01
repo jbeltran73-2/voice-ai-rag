@@ -3,6 +3,7 @@ const XAI_API_URL = 'https://api.x.ai/v1/realtime/client_secrets';
 export async function createEphemeralToken() {
   const apiKey = process.env.XAI_API_KEY;
 
+  // Only send expires_after - session config is done via session.update from the client
   const res = await fetch(XAI_API_URL, {
     method: 'POST',
     headers: {
@@ -10,33 +11,7 @@ export async function createEphemeralToken() {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: 'grok-voice-think-fast-1.0',
-      voice: 'ariel',
-      input_audio_format: 'pcm16',
-      output_audio_format: 'pcm16',
-      turn_detection: {
-        type: 'server_vad',
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 500
-      },
-      tools: [
-        {
-          type: 'function',
-          name: 'search_documents',
-          description: 'Search uploaded documents for relevant information. Call this whenever the user asks a question that might require document context.',
-          parameters: {
-            type: 'object',
-            properties: {
-              query: {
-                type: 'string',
-                description: 'The search query to find relevant document passages'
-              }
-            },
-            required: ['query']
-          }
-        }
-      ]
+      expires_after: { seconds: 300 }
     })
   });
 

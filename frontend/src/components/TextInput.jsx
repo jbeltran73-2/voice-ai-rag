@@ -25,6 +25,7 @@ export default function TextInput({ onSend, disabled }) {
       <button className="text-send" type="submit" disabled={disabled || !text.trim()}>
         Send
       </button>
+
     </form>
   );
 }
