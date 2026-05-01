@@ -81,6 +81,10 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
   const getAudioContext = useCallback(() => {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
       audioCtxRef.current = new AudioContext();
+      // Force speaker output on mobile (avoid earpiece/call mode)
+      if (typeof audioCtxRef.current.setSinkId === 'function') {
+        try { audioCtxRef.current.setSinkId('speaker'); } catch (_) {}
+      }
       console.log('Audio context at native rate:', audioCtxRef.current.sampleRate);
     }
     return audioCtxRef.current;
@@ -324,6 +328,7 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
   // ─── Audio playback (gapless scheduling) ───────────────
   // Incoming audio is PCM16 at 24000 Hz from xAI. We create the AudioBuffer
   // at 24000 Hz and let the AudioContext resample to its native rate on playback.
+  // We also force the AudioContext output to the speaker (not earpiece) on mobile.
   const playAudio = useCallback((base64) => {
     try {
       const ctx = getAudioContext();
@@ -335,6 +340,11 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
 
       const src = ctx.createBufferSource();
       src.buffer = buf;
+      // Route to speaker (not earpiece) on mobile
+      const sinkId = ctx.sinkId || '';
+      if (sinkId !== 'speaker' && typeof ctx.setSinkId === 'function') {
+        try { ctx.setSinkId('speaker'); } catch (_) {}
+      }
       src.connect(ctx.destination);
 
       const now = ctx.currentTime;
@@ -376,14 +386,17 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
         workletReadyRef.current = true;
       }
 
-      // Get mic stream
+      // Get mic stream — disable echoCancellation/noiseSuppression/autoGainControl
+      // so Chrome doesn't enter "communication mode" (which routes audio to earpiece
+      // instead of speaker on mobile). Playback will still be clean since the server
+      // uses server_vad for turn detection.
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: nativeSampleRate,
           channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
         }
       });
       micStreamRef.current = stream;

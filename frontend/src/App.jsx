@@ -10,6 +10,7 @@ import { useVoiceAgent } from './hooks/useVoiceAgent';
 export default function App() {
   const [messages, setMessages] = useState([]);
   const [status, setStatus] = useState('');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Append/extend transcript entries.
   // - Final user transcripts always create a new bubble.
@@ -89,10 +90,24 @@ export default function App() {
 
   return (
     <div className="app">
-      <aside className="sidebar">
+      <aside className={`sidebar${sidebarOpen ? '' : ' collapsed'}`}>
         <div className="sidebar-header">
           <h2>Documents</h2>
-          <ThemeToggle />
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              className="sidebar-toggle"
+              onClick={() => setSidebarOpen(v => !v)}
+              aria-label="Toggle documents"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+                {sidebarOpen
+                  ? <><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>
+                  : <><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></>
+                }
+              </svg>
+            </button>
+            <ThemeToggle />
+          </div>
         </div>
         <FileUploader />
       </aside>

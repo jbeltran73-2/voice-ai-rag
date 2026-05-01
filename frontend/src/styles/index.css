@@ -60,7 +60,7 @@ html, body {
   color: var(--fg);
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   font-weight: 400;
-  height: 100vh;
+  height: 100%;
   overflow: hidden;
   letter-spacing: -0.01em;
   -webkit-font-smoothing: antialiased;
@@ -111,6 +111,31 @@ button, input, textarea {
 }
 
 /* ================== THEME TOGGLE ================== */
+
+.sidebar-toggle {
+  background: var(--surface);
+  border: none;
+  cursor: pointer;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--blue-gray-dark);
+  display: none; /* hidden on desktop */
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--neu-out-xs);
+  transition: all 0.2s ease;
+}
+
+.sidebar-toggle:active {
+  box-shadow: var(--neu-in-sm);
+}
+
+@media (max-width: 768px) {
+  .sidebar-toggle {
+    display: flex;
+  }
+}
 
 .theme-toggle {
   background: var(--surface);
@@ -643,4 +668,168 @@ button, input, textarea {
   box-shadow: none;
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+/* ================== RESPONSIVE ================== */
+
+@media (max-width: 768px) {
+  .app {
+    flex-direction: column;
+    padding: 12px;
+    gap: 12px;
+    height: 100dvh;
+  }
+
+  /* Sidebar becomes a collapsible strip at the top */
+  .sidebar {
+    width: 100%;
+    max-height: 40dvh;
+    min-height: 44px;
+    border-radius: var(--radius-md);
+    padding: 14px;
+    gap: 10px;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+  }
+
+  .sidebar.collapsed {
+    max-height: 44px;
+  }
+
+  .sidebar.collapsed .uploader {
+    display: none;
+  }
+
+  /* Smaller assistant header */
+  .assistant-header {
+    padding: 8px 16px;
+    border-radius: var(--radius-md);
+  }
+
+  .assistant-avatar {
+    width: 32px;
+    height: 32px;
+  }
+
+  .assistant-avatar svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .assistant-name {
+    font-size: 13px;
+  }
+
+  /* Transcript takes remaining space */
+  .transcript {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .message {
+    max-width: 88%;
+    padding: 10px 14px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  /* Smaller PTT button */
+  .ptt-button {
+    width: 100px;
+    height: 100px;
+  }
+
+  .ptt-button .mic-icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .ptt-button::before {
+    inset: 12px;
+  }
+
+  .ptt-area {
+    gap: 8px;
+    padding: 10px 0 4px;
+  }
+
+  .ptt-label {
+    font-size: 11px;
+  }
+
+  .ptt-status {
+    font-size: 10px;
+  }
+
+  /* Text input */
+  .text-input-area {
+    border-radius: var(--radius-md);
+  }
+
+  .text-input {
+    padding: 10px 14px;
+    font-size: 12px;
+  }
+
+  .text-send {
+    padding: 9px 16px;
+    font-size: 11px;
+  }
+
+  /* Doc list items */
+  .doc-item {
+    padding: 8px 10px;
+    font-size: 11px;
+  }
+
+  /* Empty state */
+  .empty-state {
+    padding: 20px;
+  }
+
+  .empty-state .empty-icon {
+    width: 48px;
+    height: 48px;
+  }
+
+  .empty-state .empty-icon svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  .empty-state .empty-title {
+    font-size: 14px;
+  }
+
+  .empty-state .empty-sub {
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 400px) {
+  .app {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .sidebar {
+    padding: 10px;
+    max-height: 35dvh;
+  }
+
+  .ptt-button {
+    width: 80px;
+    height: 80px;
+  }
+
+  .ptt-button .mic-icon {
+    width: 32px;
+    height: 32px;
+  }
+
+  .message {
+    max-width: 92%;
+    padding: 8px 12px;
+    font-size: 12px;
+  }
 }
