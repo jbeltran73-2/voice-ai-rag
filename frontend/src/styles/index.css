@@ -113,28 +113,7 @@ button, input, textarea {
 /* ================== THEME TOGGLE ================== */
 
 .sidebar-toggle {
-  background: var(--surface);
-  border: none;
-  cursor: pointer;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  color: var(--blue-gray-dark);
-  display: none; /* hidden on desktop */
-  align-items: center;
-  justify-content: center;
-  box-shadow: var(--neu-out-xs);
-  transition: all 0.2s ease;
-}
-
-.sidebar-toggle:active {
-  box-shadow: var(--neu-in-sm);
-}
-
-@media (max-width: 768px) {
-  .sidebar-toggle {
-    display: flex;
-  }
+  display: none; /* hidden everywhere — replaced by menu-btn in header on mobile */
 }
 
 .theme-toggle {
@@ -164,6 +143,11 @@ button, input, textarea {
 .theme-toggle svg {
   width: 16px;
   height: 16px;
+}
+
+/* Hamburger menu button (mobile only) */
+.menu-btn {
+  display: none;
 }
 
 /* ================== FILE UPLOADER ================== */
@@ -672,43 +656,87 @@ button, input, textarea {
 
 /* ================== RESPONSIVE ================== */
 
+/* Mobile overlay sidebar */
+.sidebar-overlay {
+  display: none; /* hidden on desktop */
+}
+
 @media (max-width: 768px) {
   .app {
-    flex-direction: column;
     padding: 12px;
     gap: 12px;
     height: 100dvh;
   }
 
-  /* Sidebar becomes a collapsible strip at the top */
+  /* Sidebar: fixed overlay sliding in from left */
   .sidebar {
-    width: 100%;
-    max-height: 40dvh;
-    min-height: 44px;
-    border-radius: var(--radius-md);
-    padding: 14px;
-    gap: 10px;
-    overflow: hidden;
-    transition: max-height 0.3s ease;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 300px;
+    max-width: 85vw;
+    z-index: 100;
+    border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+    padding: 18px;
+    gap: 14px;
+    transform: translateX(-100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: none;
   }
 
-  .sidebar.collapsed {
-    max-height: 44px;
+  .sidebar.open {
+    transform: translateX(0);
+    box-shadow: 8px 0 30px rgba(0, 0, 0, 0.25);
   }
 
-  .sidebar.collapsed .uploader {
-    display: none;
+  /* Backdrop behind sidebar */
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 99;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
   }
 
-  /* Smaller assistant header */
+  .sidebar-overlay.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* Hamburger in header */
+  .menu-btn {
+    display: flex;
+    background: none;
+    border: none;
+    color: var(--blue-gray-dark);
+    cursor: pointer;
+    width: 32px;
+    height: 32px;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  /* Main area gets full width */
+  .main {
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* Compact header */
   .assistant-header {
-    padding: 8px 16px;
+    padding: 10px 14px;
     border-radius: var(--radius-md);
+    gap: 10px;
   }
 
   .assistant-avatar {
-    width: 32px;
-    height: 32px;
+    width: 34px;
+    height: 34px;
   }
 
   .assistant-avatar svg {
@@ -720,12 +748,7 @@ button, input, textarea {
     font-size: 13px;
   }
 
-  /* Transcript takes remaining space */
-  .transcript {
-    flex: 1;
-    min-height: 0;
-  }
-
+  /* Messages */
   .message {
     max-width: 88%;
     padding: 10px 14px;
@@ -733,15 +756,15 @@ button, input, textarea {
     line-height: 1.5;
   }
 
-  /* Smaller PTT button */
+  /* Smaller PTT */
   .ptt-button {
-    width: 100px;
-    height: 100px;
+    width: 96px;
+    height: 96px;
   }
 
   .ptt-button .mic-icon {
-    width: 40px;
-    height: 40px;
+    width: 38px;
+    height: 38px;
   }
 
   .ptt-button::before {
@@ -750,7 +773,7 @@ button, input, textarea {
 
   .ptt-area {
     gap: 8px;
-    padding: 10px 0 4px;
+    padding: 8px 0 4px;
   }
 
   .ptt-label {
@@ -773,12 +796,6 @@ button, input, textarea {
 
   .text-send {
     padding: 9px 16px;
-    font-size: 11px;
-  }
-
-  /* Doc list items */
-  .doc-item {
-    padding: 8px 10px;
     font-size: 11px;
   }
 
@@ -813,8 +830,8 @@ button, input, textarea {
   }
 
   .sidebar {
-    padding: 10px;
-    max-height: 35dvh;
+    width: 270px;
+    max-width: 80vw;
   }
 
   .ptt-button {
