@@ -60,6 +60,7 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
   const scheduledSourcesRef = useRef([]);
   const connectingRef = useRef(false);
   const isSessionConfiguredRef = useRef(false);
+  const isAssistantSpeakingRef = useRef(false);
   const workletReadyRef = useRef(false);
   const playAudioRef = useRef(null);
   const stopPlaybackRef = useRef(null);
@@ -175,6 +176,7 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
       // User speech started — cancel ongoing response and stop playback
       case 'input_audio_buffer.speech_started':
         console.log('Speech started');
+        isAssistantSpeakingRef.current = false;
         stopPlaybackRef.current?.();
         if (ws?.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'response.cancel' }));
@@ -200,8 +202,9 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
         }
         break;
 
-      // Assistant audio streaming
+      // Assistant audio streaming — gate mic while speaking
       case 'response.output_audio.delta':
+        isAssistantSpeakingRef.current = true;
         if (msg.delta) playAudioRef.current?.(msg.delta);
         break;
 
@@ -220,6 +223,7 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
         setIsThinking(true);
         break;
       case 'response.done':
+        isAssistantSpeakingRef.current = false;
         setIsThinking(false);
         onStatusChange?.('Ready');
         onTurnComplete?.();
@@ -386,17 +390,16 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
         workletReadyRef.current = true;
       }
 
-      // Get mic stream — disable echoCancellation/noiseSuppression/autoGainControl
-      // so Chrome doesn't enter "communication mode" (which routes audio to earpiece
-      // instead of speaker on mobile). Playback will still be clean since the server
-      // uses server_vad for turn detection.
+      // Get mic stream — keep echoCancellation ON to prevent feedback loop
+      // (mic picking up speaker output). Speaker routing is handled by
+      // AudioContext.setSinkId('speaker') instead of disabling echoCancellation.
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: nativeSampleRate,
           channelCount: 1,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
         }
       });
       micStreamRef.current = stream;
@@ -442,7 +445,7 @@ export function useVoiceAgent({ onTranscript, onCitations, onStatusChange, onTur
           const resampled = downsample(chunk, ctx.sampleRate, XAI_AUDIO_RATE);
 
           const ws = wsRef.current;
-          if (ws?.readyState === WebSocket.OPEN && isSessionConfiguredRef.current) {
+          if (ws?.readyState === WebSocket.OPEN && isSessionConfiguredRef.current && !isAssistantSpeakingRef.current) {
             ws.send(JSON.stringify({
               type: 'input_audio_buffer.append',
               audio: float32ToPCM16Base64(resampled)
