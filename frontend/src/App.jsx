@@ -130,6 +130,7 @@ export default function App() {
               {isConnected ? 'Available' : 'Offline'}
             </span>
           </div>
+          <span className="brand-logo">memba</span>
         </header>
         <Transcript messages={messages} isThinking={isThinking} />
         <PushToTalk

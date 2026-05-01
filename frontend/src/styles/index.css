@@ -367,6 +367,17 @@ button, input, textarea {
   box-shadow: 0 0 0 3px rgba(168, 180, 197, 0.25);
 }
 
+.brand-logo {
+  margin-left: auto;
+  font-family: 'Georgia', 'Times New Roman', serif;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #4aa192;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ================== TRANSCRIPT ================== */
 
 .transcript {
@@ -746,6 +757,10 @@ button, input, textarea {
 
   .assistant-name {
     font-size: 13px;
+  }
+
+  .brand-logo {
+    font-size: 16px;
   }
 
   /* Messages */
